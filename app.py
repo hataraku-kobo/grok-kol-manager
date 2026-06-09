@@ -3,56 +3,135 @@ from xai_sdk import Client
 from xai_sdk.chat import user, system
 import os
 import json
+import re
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 
 st.set_page_config(page_title="GrokKOL Manager", page_icon="🔍", layout="wide")
+
+# ==================== パスワード保護 ====================
+def check_password():
+    """シンプルなパスワード認証"""
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+
+    if not st.session_state.password_correct:
+        st.title("🔐 GrokKOL Manager")
+        password = st.text_input("パスワードを入力してください", type="password", key="pwd_input")
+
+        if st.button("ログイン", type="primary"):
+            correct_password = st.secrets.get("APP_PASSWORD", "Pmjp")
+            if password == correct_password:
+                st.session_state.password_correct = True
+                st.rerun()
+            else:
+                st.error("パスワードが違います")
+        st.stop()
+
+check_password()
+
+# ==================== ここからメインアプリ ====================
 st.title("🔍 GrokKOL Manager")
-st.markdown("**SuperGrok Heavy** でリアルタイムKOL検索 + サブエージェント验証")
+st.caption("SuperGrok Heavy × Sub-Agent検証システム")
 
 client = Client(api_key=os.getenv("XAI_API_KEY"))
 
-MAIN_PROMPT = """You are a professional KOL marketing consultant.
-For the user's theme, list up to 8 promising KOL candidates on X.
-For each candidate, include:
-- @username
-- Estimated follower count
-- Engagement trend
-- Compatibility with our company (1 sentence)
-- Recommended contact message
-Respond in Japanese."""
+if "results" not in st.session_state:
+    st.session_state.results = []
 
-SUB_AGENT_PROMPT = """You are a Verification Sub-Agent specialized in fact-checking.
-Verify the following KOL information against the latest X data.
-Output ONLY valid JSON in this format:
-{
-  "username": "@example",
-  "verified": true,
-  "notes": "验証コメント",
-  "adjusted_engagement": 5.2
-}
-If suspicious, set verified: false."""
+# 検索フォーム
+query = st.text_input("検索テーマを入力", value="AIツール マーケティング", placeholder="例: AIマーケティング / Web3 / 美容")
 
-query = st.text_input("検索テーマを入力してください", placeholder="例: AIマーケティング / 大阪 美容 / Web3 インフルエンサー", value="AIツール マーケティング")
+col1, col2 = st.columns([1, 3])
+with col1:
+    max_kols = st.slider("取得件数", 3, 10, 6)
 
-if st.button("🔍 KOL検索を実行", type="primary", use_container_width=True):
-    with st.spinner("Grok Heavy が検索 + 验証中..."):
+if st.button("🚀 KOL検索＋Sub-Agent検証を実行", type="primary", use_container_width=True):
+    with st.spinner("Main AgentがKOL候補を抽出中..."):
+        main_prompt = f"""テーマ「{query}」でX上で有望なKOLを最大{max_kols}件リストアップしてください。
+以下のJSON配列のみを出力してください：
+[
+  {{
+    "username": "@ユーザー名",
+    "display_name": "表示名",
+    "estimated_followers": 数値,
+    "engagement_trend": "上昇中/安定/下降",
+    "compatibility": "自社との相性一文"
+  }}
+]
+"""
+
+        chat = client.chat.create(model="grok-4.3")
+        chat.append(system(main_prompt))
+        chat.append(user(query))
+        response = chat.sample().text
+
+        json_match = re.search(r'\[.*\]', response, re.DOTALL)
+        candidates = json.loads(json_match.group(0)) if json_match else []
+
+    # Sub-Agent検証
+    verified_results = []
+    progress = st.progress(0, text="Sub-Agent検証中...")
+
+    for i, kol in enumerate(candidates):
+        progress.progress((i + 1) / len(candidates), text=f"検証中: @{kol['username']}")
+
+        sub_prompt = f"""以下のKOLを最新のXデータに基づいて検証してください。
+ユーザー名: {kol['username']}
+表示名: {kol.get('display_name')}
+推定フォロワー: {kol.get('estimated_followers')}
+
+出力は以下のJSONのみにしてください：
+{{
+  "username": "{kol['username']}",
+  "verified": true または false,
+  "notes": "検証コメント（活動状況・スパム傾向など）",
+  "adjusted_engagement": 1.0〜10.0の数値
+}}"""
+
+        chat2 = client.chat.create(model="grok-4.3")
+        chat2.append(system(sub_prompt))
+        chat2.append(user("検証を実行してください"))
+        sub_response = chat2.sample().text
+
         try:
-            # Main Agent
-            chat = client.chat.create(model="grok-4.3")
-            chat.append(system(MAIN_PROMPT))
-            chat.append(user(f"テーマ: {query} で8件のKOL候補をリストアップ"))
-            main_response = chat.sample().text
+            sub_json = json.loads(re.search(r'\{.*\}', sub_response, re.DOTALL).group(0))
+        except:
+            sub_json = {
+                "username": kol['username'],
+                "verified": False,
+                "notes": "検証に失敗しました",
+                "adjusted_engagement": 0
+            }
 
-            st.success("Main Agent 検索完了")
-            st.write(main_response)
+        kol.update(sub_json)
+        verified_results.append(kol)
 
-            # Simple verification display (can be expanded)
-            st.subheader("✅ Sub-Agent 验証結果")
-            st.info("验証機能は次バージョンで完全実装予定です。現在はMain Agentの結果を表示中です。")
+    progress.empty()
+    st.session_state.results = verified_results
+    st.success(f"Sub-Agent検証完了！（{len(verified_results)}件）")
 
-        except Exception as e:
-            st.error(f"エラー: {e}")
+# ==================== 結果表示 ====================
+if st.session_state.results:
+    st.subheader(f"📋 検証済みKOL一覧（{len(st.session_state.results)}件）")
 
-st.caption("Powered by Grok 4 Heavy + Streamlit | SuperGrok Heavy 活用中")
+    for kol in st.session_state.results:
+        verified = kol.get("verified", False)
+        status = "✅ 検証済み" if verified else "⚠️ 要注意"
+
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([3, 2.5, 2])
+            with c1:
+                st.markdown(f"**@{kol['username']}**　{kol.get('display_name', '')}")
+                st.caption(f"推定フォロワー: {kol.get('estimated_followers', '不明')}人")
+            with c2:
+                st.markdown(f"**検証結果**: {status}")
+                st.caption(kol.get("notes", ""))
+            with c3:
+                st.metric(label="調整後エンゲージメント", value=kol.get("adjusted_engagement", "-"))
+
+    if st.button("🗑️ 結果をクリア"):
+        st.session_state.results = []
+        st.rerun()
