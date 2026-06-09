@@ -4,7 +4,6 @@ from xai_sdk.chat import user, system
 import os
 import json
 import re
-from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,13 +12,12 @@ st.set_page_config(page_title="GrokKOL Manager", page_icon="🔍", layout="wide"
 
 # ==================== パスワード保護 ====================
 def check_password():
-    """シンプルなパスワード認証"""
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
 
     if not st.session_state.password_correct:
         st.title("🔐 GrokKOL Manager")
-        password = st.text_input("パスワードを入力してください", type="password", key="pwd_input")
+        password = st.text_input("パスワードを入力してください", type="password")
 
         if st.button("ログイン", type="primary"):
             correct_password = st.secrets.get("APP_PASSWORD", "Pmjp")
@@ -32,16 +30,21 @@ def check_password():
 
 check_password()
 
-# ==================== ここからメインアプリ ====================
+# ==================== Clientの初期化（修正済み） ====================
+def get_client():
+    api_key = st.secrets.get("XAI_API_KEY") or os.getenv("XAI_API_KEY")
+    if not api_key:
+        st.error("XAI_API_KEYが設定されていません。Secretsを確認してください。")
+        st.stop()
+    return Client(api_key=api_key)
+
+# ==================== メイン処理 ====================
 st.title("🔍 GrokKOL Manager")
 st.caption("SuperGrok Heavy × Sub-Agent検証システム")
-
-client = Client(api_key=os.getenv("XAI_API_KEY"))
 
 if "results" not in st.session_state:
     st.session_state.results = []
 
-# 検索フォーム
 query = st.text_input("検索テーマを入力", value="AIツール マーケティング", placeholder="例: AIマーケティング / Web3 / 美容")
 
 col1, col2 = st.columns([1, 3])
@@ -49,6 +52,8 @@ with col1:
     max_kols = st.slider("取得件数", 3, 10, 6)
 
 if st.button("🚀 KOL検索＋Sub-Agent検証を実行", type="primary", use_container_width=True):
+    client = get_client()
+
     with st.spinner("Main AgentがKOL候補を抽出中..."):
         main_prompt = f"""テーマ「{query}」でX上で有望なKOLを最大{max_kols}件リストアップしてください。
 以下のJSON配列のみを出力してください：
@@ -62,7 +67,6 @@ if st.button("🚀 KOL検索＋Sub-Agent検証を実行", type="primary", use_co
   }}
 ]
 """
-
         chat = client.chat.create(model="grok-4.3")
         chat.append(system(main_prompt))
         chat.append(user(query))
